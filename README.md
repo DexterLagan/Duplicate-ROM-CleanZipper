@@ -1,4 +1,4 @@
-# ROM DupeCleanZipper
+# ROM CleanZipper
 
 A robust Windows desktop application for finding and removing duplicate files on any disk drive. The tool identifies files that exist both as compressed `.zip` archives and as standalone files with other extensions, helping you reclaim storage space while maintaining data integrity. Perfect for ROM collections, media archives, and any organized file collections.
 
