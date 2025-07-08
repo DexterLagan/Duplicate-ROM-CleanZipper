@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
@@ -6,10 +7,11 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Management;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace DuplicateCleaner
+namespace DuplicateROMCleanZipper
 {
     public partial class MainForm : Form
     {
@@ -27,22 +29,33 @@ namespace DuplicateCleaner
         private Button selectAllDuplicatesButton;
         private Button selectAllOrphansButton;
 
-        private List<DuplicateFile> foundDuplicates = new List<DuplicateFile>();
-        private List<string> foundOrphans = new List<string>();
-        private BackgroundWorker scanWorker;
-        private BackgroundWorker processWorker;
+        private ConcurrentQueue<DuplicateFile> foundDuplicates = new ConcurrentQueue<DuplicateFile>();
+        private ConcurrentQueue<string> foundOrphans = new ConcurrentQueue<string>();
+        private ConcurrentQueue<string> logMessages = new ConcurrentQueue<string>();
+        
+        private CancellationTokenSource scanCancellationTokenSource;
+        private CancellationTokenSource processCancellationTokenSource;
+        private System.Windows.Forms.Timer uiUpdateTimer;
+        
+        private volatile bool isScanRunning = false;
+        private volatile bool isProcessRunning = false;
+        private volatile bool isPopulatingResults = false;
+        private volatile int totalDirectories = 0;
+        private volatile int processedDirectories = 0;
+        private List<DuplicateFile> allDuplicates = new List<DuplicateFile>();
+        private List<string> allOrphans = new List<string>();
 
         public MainForm()
         {
             InitializeComponent();
-            SetupBackgroundWorkers();
+            SetupUIUpdateTimer();
             LoadDrives();
         }
 
         private void InitializeComponent()
         {
             // Form setup
-            this.Text = "SD Card Duplicate File Cleaner";
+            this.Text = "Duplicate ROM CleanZipper";
             this.Size = new Size(800, 700);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.MinimumSize = new Size(750, 600);
@@ -214,27 +227,11 @@ namespace DuplicateCleaner
             this.Controls.Add(processButton);
         }
 
-        private void SetupBackgroundWorkers()
+        private void SetupUIUpdateTimer()
         {
-            // Scan worker
-            scanWorker = new BackgroundWorker
-            {
-                WorkerReportsProgress = true,
-                WorkerSupportsCancellation = true
-            };
-            scanWorker.DoWork += ScanWorker_DoWork;
-            scanWorker.ProgressChanged += ScanWorker_ProgressChanged;
-            scanWorker.RunWorkerCompleted += ScanWorker_RunWorkerCompleted;
-
-            // Process worker
-            processWorker = new BackgroundWorker
-            {
-                WorkerReportsProgress = true,
-                WorkerSupportsCancellation = true
-            };
-            processWorker.DoWork += ProcessWorker_DoWork;
-            processWorker.ProgressChanged += ProcessWorker_ProgressChanged;
-            processWorker.RunWorkerCompleted += ProcessWorker_RunWorkerCompleted;
+            uiUpdateTimer = new System.Windows.Forms.Timer();
+            uiUpdateTimer.Interval = 500; // Update UI every 500ms to reduce overhead
+            uiUpdateTimer.Tick += UIUpdateTimer_Tick;
         }
 
         private void LoadDrives()
@@ -267,12 +264,19 @@ namespace DuplicateCleaner
             }
             catch (Exception ex)
             {
-                LogMessage($"Error loading drives: {ex.Message}");
+                QueueLogMessage($"Error loading drives: {ex.Message}");
             }
         }
 
-        private void ScanButton_Click(object sender, EventArgs e)
+        private async void ScanButton_Click(object sender, EventArgs e)
         {
+            if (isScanRunning)
+            {
+                // Cancel scan
+                scanCancellationTokenSource?.Cancel();
+                return;
+            }
+
             if (driveComboBox.SelectedItem == null)
             {
                 MessageBox.Show("Please select a drive to scan.", "No Drive Selected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -282,21 +286,20 @@ namespace DuplicateCleaner
             var selectedDrive = ((DriveInfo)driveComboBox.SelectedItem).DeviceID;
             
             // Clear previous results
-            foundDuplicates.Clear();
-            foundOrphans.Clear();
-            duplicatesListBox.Items.Clear();
-            orphansListBox.Items.Clear();
-            logTextBox.Clear();
-            processButton.Enabled = false;
+            ClearResults();
 
             // Start scan
-            scanButton.Enabled = false;
-            LogMessage($"Starting scan of {selectedDrive}...");
-            scanWorker.RunWorkerAsync(selectedDrive);
+            await StartScanAsync(selectedDrive);
         }
 
-        private void ProcessButton_Click(object sender, EventArgs e)
+        private async void ProcessButton_Click(object sender, EventArgs e)
         {
+            if (isProcessRunning)
+            {
+                processCancellationTokenSource?.Cancel();
+                return;
+            }
+
             var selectedDuplicates = duplicatesListBox.CheckedItems.Cast<string>().ToList();
             var selectedOrphans = orphansListBox.CheckedItems.Cast<string>().ToList();
 
@@ -324,63 +327,211 @@ namespace DuplicateCleaner
                 }
 
                 // Start processing
-                processButton.Enabled = false;
-                scanButton.Enabled = false;
-                var processData = new ProcessData
-                {
-                    SelectedDuplicates = selectedDuplicates,
-                    SelectedOrphans = selectedOrphans,
-                    DryRun = dryRunCheckBox.Checked,
-                    DeleteDuplicates = deleteDuplicatesCheckBox.Checked,
-                    CompressOrphans = compressOrphansCheckBox.Checked
-                };
-                processWorker.RunWorkerAsync(processData);
+                await StartProcessAsync(selectedDuplicates, selectedOrphans);
             }
         }
 
-        private void ScanWorker_DoWork(object sender, DoWorkEventArgs e)
+        private async Task StartScanAsync(string drivePath)
         {
-            var drivePath = (string)e.Argument;
-            var worker = (BackgroundWorker)sender;
+            isScanRunning = true;
+            scanCancellationTokenSource = new CancellationTokenSource();
+            scanButton.Text = "Cancel";
+            scanButton.Enabled = true;
+            processButton.Enabled = false;
+            
+            uiUpdateTimer.Start();
+            QueueLogMessage($"Starting scan of {drivePath}...");
 
             try
             {
-                var directories = GetAccessibleDirectories(drivePath, worker).ToList();
-                directories.Insert(0, drivePath); // Include root directory
-
-                worker.ReportProgress(0, $"Found {directories.Count} directories to scan (including {drivePath}\\)");
-
-                for (int i = 0; i < directories.Count; i++)
-                {
-                    if (worker.CancellationPending)
-                    {
-                        e.Cancel = true;
-                        return;
-                    }
-
-                    var directory = directories[i];
-                    var displayDir = directory == drivePath ? $"{drivePath}\\" : directory;
-                    worker.ReportProgress((i * 100) / directories.Count, $"Scanning: {displayDir}");
-
-                    try
-                    {
-                        ScanDirectory(directory, worker);
-                    }
-                    catch (Exception ex)
-                    {
-                        worker.ReportProgress(-1, $"Error scanning {displayDir}: {ex.Message}");
-                    }
-                }
-
-                worker.ReportProgress(100, "Scan completed");
+                await Task.Run(() => ScanDriveAsync(drivePath, scanCancellationTokenSource.Token), scanCancellationTokenSource.Token);
+                
+                QueueLogMessage("Scan completed - preparing results...");
+                await PopulateResultsAsync();
+                
+                if (allDuplicates.Count > 0 || allOrphans.Count > 0)
+                    processButton.Enabled = true;
+            }
+            catch (OperationCanceledException)
+            {
+                QueueLogMessage("Scan cancelled by user");
             }
             catch (Exception ex)
             {
-                worker.ReportProgress(-1, $"Scan error: {ex.Message}");
+                QueueLogMessage($"Scan error: {ex.Message}");
+            }
+            finally
+            {
+                isScanRunning = false;
+                scanButton.Text = "Scan";
+                uiUpdateTimer.Stop();
+                
+                // Final UI update
+                UpdateUI();
             }
         }
 
-        private IEnumerable<string> GetAccessibleDirectories(string rootPath, BackgroundWorker worker)
+        private async Task StartProcessAsync(List<string> selectedDuplicates, List<string> selectedOrphans)
+        {
+            isProcessRunning = true;
+            processCancellationTokenSource = new CancellationTokenSource();
+            processButton.Text = "Cancel";
+            scanButton.Enabled = false;
+            
+            uiUpdateTimer.Start();
+
+            try
+            {
+                await Task.Run(() => ProcessFilesAsync(selectedDuplicates, selectedOrphans, processCancellationTokenSource.Token), processCancellationTokenSource.Token);
+                QueueLogMessage("Processing completed successfully");
+            }
+            catch (OperationCanceledException)
+            {
+                QueueLogMessage("Processing cancelled by user");
+            }
+            catch (Exception ex)
+            {
+                QueueLogMessage($"Processing error: {ex.Message}");
+            }
+            finally
+            {
+                isProcessRunning = false;
+                processButton.Text = "Process Selected";
+                scanButton.Enabled = true;
+                uiUpdateTimer.Stop();
+                
+                // Final UI update
+                UpdateUI();
+            }
+        }
+
+        private async Task ScanDriveAsync(string drivePath, CancellationToken cancellationToken)
+        {
+            var directories = await Task.Run(() => GetAccessibleDirectories(drivePath, cancellationToken), cancellationToken);
+            var allDirectories = directories.ToList();
+            allDirectories.Insert(0, drivePath);
+
+            totalDirectories = allDirectories.Count;
+            processedDirectories = 0;
+
+            QueueLogMessage($"Found {totalDirectories} directories to scan (including {drivePath}\\)");
+
+            foreach (var directory in allDirectories)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                await Task.Run(() => ScanDirectory(directory, cancellationToken), cancellationToken);
+                
+                Interlocked.Increment(ref processedDirectories);
+                
+                // Only log every 10th directory to reduce UI flooding
+                if (processedDirectories % 10 == 0 || processedDirectories == totalDirectories)
+                {
+                    var displayDir = directory == drivePath ? $"{drivePath}\\" : directory;
+                    QueueLogMessage($"Scanned: {displayDir} ({processedDirectories}/{totalDirectories})");
+                }
+            }
+        }
+
+        private async Task ProcessFilesAsync(List<string> selectedDuplicates, List<string> selectedOrphans, CancellationToken cancellationToken)
+        {
+            int totalItems = selectedDuplicates.Count + selectedOrphans.Count;
+            int processedItems = 0;
+
+            // Process duplicates
+            if (deleteDuplicatesCheckBox.Checked)
+            {
+                foreach (var duplicateDisplay in selectedDuplicates)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var duplicate = FindDuplicateByDisplay(duplicateDisplay);
+                    if (duplicate != null)
+                    {
+                        await Task.Run(() => ProcessDuplicateFile(duplicate, dryRunCheckBox.Checked, cancellationToken), cancellationToken);
+                        Interlocked.Increment(ref processedItems);
+                    }
+                }
+            }
+
+            // Process orphans
+            if (compressOrphansCheckBox.Checked)
+            {
+                foreach (var orphanDisplay in selectedOrphans)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var orphan = FindOrphanByDisplay(orphanDisplay);
+                    if (orphan != null)
+                    {
+                        await Task.Run(() => ProcessOrphanFile(orphan, dryRunCheckBox.Checked, cancellationToken), cancellationToken);
+                        Interlocked.Increment(ref processedItems);
+                    }
+                }
+            }
+        }
+
+        private void ProcessDuplicateFile(DuplicateFile duplicate, bool dryRun, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (dryRun)
+            {
+                QueueLogMessage($"[DRY RUN] Would delete: {duplicate.FilePath}");
+            }
+            else
+            {
+                try
+                {
+                    File.Delete(duplicate.FilePath);
+                    QueueLogMessage($"[DELETED] {duplicate.FilePath}");
+                }
+                catch (Exception ex)
+                {
+                    QueueLogMessage($"[ERROR] Failed to delete {duplicate.FilePath}: {ex.Message}");
+                }
+            }
+        }
+
+        private void ProcessOrphanFile(string orphanPath, bool dryRun, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (dryRun)
+            {
+                QueueLogMessage($"[DRY RUN] Would compress: {orphanPath}");
+            }
+            else
+            {
+                try
+                {
+                    var zipPath = Path.Combine(Path.GetDirectoryName(orphanPath), Path.GetFileNameWithoutExtension(orphanPath) + ".zip");
+                    
+                    using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+                    {
+                        archive.CreateEntryFromFile(orphanPath, Path.GetFileName(orphanPath));
+                    }
+
+                    // Verify compression
+                    if (IsFileInZip(zipPath, Path.GetFileName(orphanPath), new FileInfo(orphanPath).Length))
+                    {
+                        File.Delete(orphanPath);
+                        QueueLogMessage($"[COMPRESSED] {orphanPath} -> {Path.GetFileName(zipPath)}");
+                    }
+                    else
+                    {
+                        File.Delete(zipPath);
+                        QueueLogMessage($"[ERROR] Compression verification failed: {orphanPath}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    QueueLogMessage($"[ERROR] Failed to compress {orphanPath}: {ex.Message}");
+                }
+            }
+        }
+
+        private IEnumerable<string> GetAccessibleDirectories(string rootPath, CancellationToken cancellationToken)
         {
             var directories = new List<string>();
             var queue = new Queue<string>();
@@ -388,6 +539,8 @@ namespace DuplicateCleaner
 
             while (queue.Count > 0)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                
                 var currentDir = queue.Dequeue();
                 
                 try
@@ -400,7 +553,7 @@ namespace DuplicateCleaner
                         ((dirInfo.Attributes & FileAttributes.Hidden) == FileAttributes.Hidden ||
                          (dirInfo.Attributes & FileAttributes.System) == FileAttributes.System))
                     {
-                        worker.ReportProgress(-1, $"Skipping protected directory: {dirDisplayName}");
+                        QueueLogMessage($"Skipping protected directory: {dirDisplayName}");
                         continue;
                     }
 
@@ -414,71 +567,80 @@ namespace DuplicateCleaner
                 catch (UnauthorizedAccessException)
                 {
                     var dirDisplayName = string.IsNullOrEmpty(Path.GetFileName(currentDir)) ? currentDir : Path.GetFileName(currentDir);
-                    worker.ReportProgress(-1, $"Access denied (skipping): {dirDisplayName}");
+                    QueueLogMessage($"Access denied (skipping): {dirDisplayName}");
                 }
                 catch (Exception ex)
                 {
                     var dirDisplayName = string.IsNullOrEmpty(Path.GetFileName(currentDir)) ? currentDir : Path.GetFileName(currentDir);
-                    worker.ReportProgress(-1, $"Error accessing {dirDisplayName}: {ex.Message}");
+                    QueueLogMessage($"Error accessing {dirDisplayName}: {ex.Message}");
                 }
             }
 
             return directories;
         }
 
-        private void ScanDirectory(string directoryPath, BackgroundWorker worker)
+        private void ScanDirectory(string directoryPath, CancellationToken cancellationToken)
         {
-            var files = Directory.GetFiles(directoryPath);
-            if (files.Length == 0) return;
+            cancellationToken.ThrowIfCancellationRequested();
 
-            // Group files by basename
-            var fileGroups = files
-                .Select(f => new FileInfo(f))
-                .GroupBy(f => Path.GetFileNameWithoutExtension(f.Name))
-                .Where(g => g.Count() > 1);
-
-            foreach (var group in fileGroups)
+            try
             {
-                var zipFile = group.FirstOrDefault(f => f.Extension.Equals(".zip", StringComparison.OrdinalIgnoreCase));
-                var otherFiles = group.Where(f => !f.Extension.Equals(".zip", StringComparison.OrdinalIgnoreCase));
+                var files = Directory.GetFiles(directoryPath);
+                if (files.Length == 0) return;
 
-                if (zipFile != null && otherFiles.Any())
+                // Group files by basename
+                var fileGroups = files
+                    .Select(f => new FileInfo(f))
+                    .GroupBy(f => Path.GetFileNameWithoutExtension(f.Name))
+                    .Where(g => g.Count() > 1);
+
+                foreach (var group in fileGroups)
                 {
-                    foreach (var otherFile in otherFiles)
-                    {
-                        worker.ReportProgress(-1, $"Checking: {otherFile.Name} vs {zipFile.Name}");
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                        if (IsFileInZip(zipFile.FullName, otherFile.Name, otherFile.Length))
+                    var zipFile = group.FirstOrDefault(f => f.Extension.Equals(".zip", StringComparison.OrdinalIgnoreCase));
+                    var otherFiles = group.Where(f => !f.Extension.Equals(".zip", StringComparison.OrdinalIgnoreCase));
+
+                    if (zipFile != null && otherFiles.Any())
+                    {
+                        foreach (var otherFile in otherFiles)
                         {
-                            var duplicate = new DuplicateFile
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            if (IsFileInZip(zipFile.FullName, otherFile.Name, otherFile.Length))
                             {
-                                ZipFile = zipFile.FullName,
-                                FilePath = otherFile.FullName,
-                                Size = otherFile.Length
-                            };
-                            foundDuplicates.Add(duplicate);
-                            worker.ReportProgress(-1, $"  [MATCH] Duplicate found: {otherFile.Name}");
-                        }
-                        else
-                        {
-                            worker.ReportProgress(-1, $"  [NO MATCH] File differs or not in ZIP");
+                                var duplicate = new DuplicateFile
+                                {
+                                    ZipFile = zipFile.FullName,
+                                    FilePath = otherFile.FullName,
+                                    Size = otherFile.Length
+                                };
+                                foundDuplicates.Enqueue(duplicate);
+                                QueueLogMessage($"Duplicate found: {otherFile.Name}");
+                            }
                         }
                     }
                 }
-            }
 
-            // Find orphans
-            var nonZipFiles = files.Where(f => !f.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
-            foreach (var file in nonZipFiles)
-            {
-                var basename = Path.GetFileNameWithoutExtension(file);
-                var correspondingZip = Path.Combine(directoryPath, basename + ".zip");
-
-                if (!File.Exists(correspondingZip))
+                // Find orphans
+                var nonZipFiles = files.Where(f => !f.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
+                foreach (var file in nonZipFiles)
                 {
-                    foundOrphans.Add(file);
-                    worker.ReportProgress(-1, $"Orphan found: {Path.GetFileName(file)}");
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var basename = Path.GetFileNameWithoutExtension(file);
+                    var correspondingZip = Path.Combine(directoryPath, basename + ".zip");
+
+                    if (!File.Exists(correspondingZip))
+                    {
+                        foundOrphans.Enqueue(file);
+                        QueueLogMessage($"Orphan found: {Path.GetFileName(file)}");
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                QueueLogMessage($"Error scanning {directoryPath}: {ex.Message}");
             }
         }
 
@@ -498,184 +660,203 @@ namespace DuplicateCleaner
             }
         }
 
-        private void ScanWorker_ProgressChanged(object sender, ProgressChangedEventArgs e)
+        private void UIUpdateTimer_Tick(object sender, EventArgs e)
         {
-            if (e.ProgressPercentage >= 0)
+            UpdateUI();
+        }
+
+        private void UpdateUI()
+        {
+            if (InvokeRequired)
             {
-                progressBar.Value = e.ProgressPercentage;
-                statusLabel.Text = $"Progress: {e.ProgressPercentage}%";
+                Invoke(new Action(UpdateUI));
+                return;
             }
 
-            if (e.UserState != null)
+            // Update progress
+            if (totalDirectories > 0)
             {
-                LogMessage(e.UserState.ToString());
+                int progress = (processedDirectories * 100) / totalDirectories;
+                progressBar.Value = Math.Min(100, Math.Max(0, progress));
+                
+                if (isScanRunning)
+                    statusLabel.Text = $"Scanning: {processedDirectories}/{totalDirectories} directories ({progress}%)";
+                else if (isProcessRunning)
+                    statusLabel.Text = $"Processing files...";
+                else if (isPopulatingResults)
+                    statusLabel.Text = $"Loading results...";
+                else
+                    statusLabel.Text = "Ready";
+            }
+
+            // Update log (batch process with better throttling)
+            var messagesToAdd = new List<string>();
+            while (logMessages.TryDequeue(out string message) && messagesToAdd.Count < 5) // Reduced from 10 to 5
+            {
+                messagesToAdd.Add($"[{DateTime.Now:HH:mm:ss}] {message}");
+            }
+
+            if (messagesToAdd.Count > 0)
+            {
+                // Limit total lines in log to prevent memory issues
+                var currentLines = logTextBox.Lines.Length;
+                if (currentLines > 1000)
+                {
+                    var recentLines = logTextBox.Lines.Skip(currentLines - 800).ToArray();
+                    logTextBox.Lines = recentLines;
+                }
+
+                logTextBox.AppendText(string.Join("\r\n", messagesToAdd) + "\r\n");
+                logTextBox.ScrollToCaret();
             }
         }
 
-        private void ScanWorker_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
+        private void ClearResults()
         {
-            progressBar.Value = 0;
-            statusLabel.Text = "Scan completed";
-            scanButton.Enabled = true;
-
-            // Populate results
-            duplicatesListBox.Items.Clear();
-            foreach (var dup in foundDuplicates)
-            {
-                var sizeMB = Math.Round(dup.Size / (1024.0 * 1024.0), 2);
-                var displayText = $"{Path.GetFileName(dup.FilePath)} ({sizeMB} MB) - {Path.GetDirectoryName(dup.FilePath)}";
-                duplicatesListBox.Items.Add(displayText, true);
-            }
-
-            orphansListBox.Items.Clear();
-            foreach (var orphan in foundOrphans)
-            {
-                var fileInfo = new FileInfo(orphan);
-                var sizeMB = Math.Round(fileInfo.Length / (1024.0 * 1024.0), 2);
-                var displayText = $"{fileInfo.Name} ({sizeMB} MB) - {fileInfo.DirectoryName}";
-                orphansListBox.Items.Add(displayText, true);
-            }
-
-            LogMessage($"Scan results: {foundDuplicates.Count} duplicates, {foundOrphans.Count} orphans");
+            // Clear collections
+            while (foundDuplicates.TryDequeue(out _)) { }
+            while (foundOrphans.TryDequeue(out _)) { }
+            while (logMessages.TryDequeue(out _)) { }
             
-            if (foundDuplicates.Count > 0 || foundOrphans.Count > 0)
-                processButton.Enabled = true;
-        }
+            allDuplicates.Clear();
+            allOrphans.Clear();
 
-        private void ProcessWorker_DoWork(object sender, DoWorkEventArgs e)
-        {
-            var data = (ProcessData)e.Argument;
-            var worker = (BackgroundWorker)sender;
-
-            int totalItems = data.SelectedDuplicates.Count + data.SelectedOrphans.Count;
-            int processedItems = 0;
-
-            // Process duplicates
-            if (data.DeleteDuplicates)
-            {
-                foreach (var duplicateDisplay in data.SelectedDuplicates)
-                {
-                    if (worker.CancellationPending)
-                    {
-                        e.Cancel = true;
-                        return;
-                    }
-
-                    var duplicate = FindDuplicateByDisplay(duplicateDisplay);
-                    if (duplicate != null)
-                    {
-                        worker.ReportProgress((processedItems * 100) / totalItems, $"Processing duplicate: {Path.GetFileName(duplicate.FilePath)}");
-
-                        if (data.DryRun)
-                        {
-                            worker.ReportProgress(-1, $"[DRY RUN] Would delete: {duplicate.FilePath}");
-                        }
-                        else
-                        {
-                            try
-                            {
-                                File.Delete(duplicate.FilePath);
-                                worker.ReportProgress(-1, $"[DELETED] {duplicate.FilePath}");
-                            }
-                            catch (Exception ex)
-                            {
-                                worker.ReportProgress(-1, $"[ERROR] Failed to delete {duplicate.FilePath}: {ex.Message}");
-                            }
-                        }
-                    }
-                    processedItems++;
-                }
-            }
-
-            // Process orphans
-            if (data.CompressOrphans)
-            {
-                foreach (var orphanDisplay in data.SelectedOrphans)
-                {
-                    if (worker.CancellationPending)
-                    {
-                        e.Cancel = true;
-                        return;
-                    }
-
-                    var orphan = FindOrphanByDisplay(orphanDisplay);
-                    if (orphan != null)
-                    {
-                        worker.ReportProgress((processedItems * 100) / totalItems, $"Processing orphan: {Path.GetFileName(orphan)}");
-
-                        if (data.DryRun)
-                        {
-                            worker.ReportProgress(-1, $"[DRY RUN] Would compress: {orphan}");
-                        }
-                        else
-                        {
-                            try
-                            {
-                                var zipPath = Path.Combine(Path.GetDirectoryName(orphan), Path.GetFileNameWithoutExtension(orphan) + ".zip");
-                                using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
-                                {
-                                    archive.CreateEntryFromFile(orphan, Path.GetFileName(orphan));
-                                }
-
-                                // Verify compression
-                                if (IsFileInZip(zipPath, Path.GetFileName(orphan), new FileInfo(orphan).Length))
-                                {
-                                    File.Delete(orphan);
-                                    worker.ReportProgress(-1, $"[COMPRESSED] {orphan} -> {Path.GetFileName(zipPath)}");
-                                }
-                                else
-                                {
-                                    File.Delete(zipPath);
-                                    worker.ReportProgress(-1, $"[ERROR] Compression verification failed: {orphan}");
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                worker.ReportProgress(-1, $"[ERROR] Failed to compress {orphan}: {ex.Message}");
-                            }
-                        }
-                    }
-                    processedItems++;
-                }
-            }
-
-            worker.ReportProgress(100, "Processing completed");
-        }
-
-        private void ProcessWorker_ProgressChanged(object sender, ProgressChangedEventArgs e)
-        {
-            if (e.ProgressPercentage >= 0)
-            {
-                progressBar.Value = e.ProgressPercentage;
-                statusLabel.Text = $"Processing: {e.ProgressPercentage}%";
-            }
-
-            if (e.UserState != null)
-            {
-                LogMessage(e.UserState.ToString());
-            }
-        }
-
-        private void ProcessWorker_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
-        {
+            // Clear UI
+            duplicatesListBox.Items.Clear();
+            orphansListBox.Items.Clear();
+            logTextBox.Clear();
+            processButton.Enabled = false;
             progressBar.Value = 0;
-            statusLabel.Text = "Processing completed";
-            scanButton.Enabled = true;
-            processButton.Enabled = true;
+            statusLabel.Text = "Ready";
 
-            LogMessage("Processing completed!");
+            // Reset counters
+            totalDirectories = 0;
+            processedDirectories = 0;
+        }
+
+        private async Task PopulateResultsAsync()
+        {
+            if (isPopulatingResults) return;
+            isPopulatingResults = true;
+
+            try
+            {
+                // First, collect all results from queues
+                await Task.Run(() =>
+                {
+                    allDuplicates.Clear();
+                    allOrphans.Clear();
+
+                    while (foundDuplicates.TryDequeue(out DuplicateFile dup))
+                    {
+                        allDuplicates.Add(dup);
+                    }
+
+                    while (foundOrphans.TryDequeue(out string orphan))
+                    {
+                        allOrphans.Add(orphan);
+                    }
+                });
+
+                // Clear the UI lists first
+                if (InvokeRequired)
+                {
+                    Invoke(new Action(() =>
+                    {
+                        duplicatesListBox.Items.Clear();
+                        orphansListBox.Items.Clear();
+                    }));
+                }
+                else
+                {
+                    duplicatesListBox.Items.Clear();
+                    orphansListBox.Items.Clear();
+                }
+
+                // Populate duplicates in batches of 50
+                const int batchSize = 50;
+                for (int i = 0; i < allDuplicates.Count; i += batchSize)
+                {
+                    var batch = allDuplicates.Skip(i).Take(batchSize).ToList();
+                    var displayItems = batch.Select(dup =>
+                    {
+                        var sizeMB = Math.Round(dup.Size / (1024.0 * 1024.0), 2);
+                        return $"{Path.GetFileName(dup.FilePath)} ({sizeMB} MB) - {Path.GetDirectoryName(dup.FilePath)}";
+                    }).ToList();
+
+                    if (InvokeRequired)
+                    {
+                        await Task.Run(() => Invoke(new Action(() =>
+                        {
+                            foreach (var item in displayItems)
+                            {
+                                duplicatesListBox.Items.Add(item, true);
+                            }
+                        })));
+                    }
+                    else
+                    {
+                        foreach (var item in displayItems)
+                        {
+                            duplicatesListBox.Items.Add(item, true);
+                        }
+                    }
+
+                    // Small delay to keep UI responsive
+                    await Task.Delay(10);
+                }
+
+                // Populate orphans in batches
+                for (int i = 0; i < allOrphans.Count; i += batchSize)
+                {
+                    var batch = allOrphans.Skip(i).Take(batchSize).ToList();
+                    var displayItems = batch.Select(orphan =>
+                    {
+                        var fileInfo = new FileInfo(orphan);
+                        var sizeMB = Math.Round(fileInfo.Length / (1024.0 * 1024.0), 2);
+                        return $"{fileInfo.Name} ({sizeMB} MB) - {fileInfo.DirectoryName}";
+                    }).ToList();
+
+                    if (InvokeRequired)
+                    {
+                        await Task.Run(() => Invoke(new Action(() =>
+                        {
+                            foreach (var item in displayItems)
+                            {
+                                orphansListBox.Items.Add(item, true);
+                            }
+                        })));
+                    }
+                    else
+                    {
+                        foreach (var item in displayItems)
+                        {
+                            orphansListBox.Items.Add(item, true);
+                        }
+                    }
+
+                    // Small delay to keep UI responsive
+                    await Task.Delay(10);
+                }
+
+                QueueLogMessage($"Results loaded: {allDuplicates.Count} duplicates, {allOrphans.Count} orphans");
+            }
+            finally
+            {
+                isPopulatingResults = false;
+            }
         }
 
         private DuplicateFile FindDuplicateByDisplay(string displayText)
         {
             var fileName = displayText.Split('(')[0].Trim();
-            return foundDuplicates.FirstOrDefault(d => Path.GetFileName(d.FilePath) == fileName);
+            return allDuplicates.FirstOrDefault(d => Path.GetFileName(d.FilePath) == fileName);
         }
 
         private string FindOrphanByDisplay(string displayText)
         {
             var fileName = displayText.Split('(')[0].Trim();
-            return foundOrphans.FirstOrDefault(o => Path.GetFileName(o) == fileName);
+            return allOrphans.FirstOrDefault(o => Path.GetFileName(o) == fileName);
         }
 
         private void ToggleAllItems(CheckedListBox listBox)
@@ -687,16 +868,18 @@ namespace DuplicateCleaner
             }
         }
 
-        private void LogMessage(string message)
+        private void QueueLogMessage(string message)
         {
-            if (InvokeRequired)
-            {
-                Invoke(new Action<string>(LogMessage), message);
-                return;
-            }
+            logMessages.Enqueue(message);
+        }
 
-            logTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\r\n");
-            logTextBox.ScrollToCaret();
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            scanCancellationTokenSource?.Cancel();
+            processCancellationTokenSource?.Cancel();
+            uiUpdateTimer?.Stop();
+            uiUpdateTimer?.Dispose();
+            base.OnFormClosing(e);
         }
 
         public class DriveInfo
@@ -712,15 +895,6 @@ namespace DuplicateCleaner
             public string ZipFile { get; set; }
             public string FilePath { get; set; }
             public long Size { get; set; }
-        }
-
-        public class ProcessData
-        {
-            public List<string> SelectedDuplicates { get; set; }
-            public List<string> SelectedOrphans { get; set; }
-            public bool DryRun { get; set; }
-            public bool DeleteDuplicates { get; set; }
-            public bool CompressOrphans { get; set; }
         }
     }
 }
