@@ -1,204 +1,147 @@
 # ROM CleanZipper
 
-A robust Windows desktop application for finding and removing duplicate files on any disk drive. The tool identifies files that exist both as compressed `.zip` archives and as standalone files with other extensions, helping you reclaim storage space while maintaining data integrity. Perfect for ROM collections, media archives, and any organized file collections.
+A Windows utility for managing ROM file collections by identifying and cleaning up duplicate files and compressing orphaned files.
 
-## 🎯 Features
+## Overview
+
+ROM CleanZipper scans selected drives to find:
+- **Duplicate ROM files**: Files that exist in both compressed (.zip) and uncompressed formats
+- **Orphaned ROM files**: Uncompressed files that don't have a corresponding .zip archive
+
+The tool helps maintain an organized ROM collection by removing redundant files and ensuring all ROMs are properly archived.
+
+## Features
 
 ### Core Functionality
-- **Smart Duplicate Detection**: Finds files with identical basenames where one is a `.zip` and another has a different extension
-- **Content Verification**: Validates that duplicate files actually exist inside ZIP archives with matching file sizes
-- **Orphan File Compression**: Automatically compresses standalone files (without corresponding ZIPs) into individual ZIP archives
-- **Multi-Extension Support**: Handles any file extensions (`.rom`, `.stm`, `.mp3`, `.pdf`, etc.) alongside ZIP files
-
-### Safety & Usability
-- **Dry Run Mode**: Preview exactly what will be deleted/compressed before making changes
-- **Double Confirmation**: Two-level confirmation system prevents accidental deletions
-- **Protected Directory Handling**: Automatically skips system and hidden directories with informative warnings
-- **Real-time Progress**: Live progress bars and detailed logging during scan and processing operations
-- **Selective Processing**: Choose exactly which duplicates and orphans to process via checkboxes
+- **Duplicate Detection**: Identifies files that exist in both zipped and unzipped formats
+- **Orphan Detection**: Finds uncompressed files without corresponding zip archives
+- **Batch Processing**: Process multiple files at once with a single click
+- **Dry Run Mode**: Preview what will be changed before committing to any file operations
+- **Selective Operations**: Choose to delete duplicates, compress orphans, or both
 
 ### User Interface
-- **Drive Selection**: GUI dropdown showing available drives (D: and above) with size information
-- **Visual Results**: Separate lists for duplicates and orphans with file sizes and paths
-- **Live Logging**: Real-time operation log with timestamps
-- **Batch Operations**: Select all/none options for quick processing decisions
-
-## 📋 How It Works
-
-### Duplicate Detection Process
-1. **File Grouping**: Groups files by basename (filename without extension)
-2. **ZIP Matching**: Identifies groups containing both `.zip` files and other extensions
-3. **Content Verification**: Extracts and compares file sizes to ensure actual duplicates
-4. **Safe Deletion**: Only deletes verified duplicates after user confirmation
-
-### Orphan Processing
-1. **Orphan Identification**: Finds files without corresponding ZIP archives
-2. **Individual Compression**: Creates separate ZIP file for each orphan
-3. **Integrity Verification**: Confirms successful compression before deleting originals
-4. **Rollback Protection**: Keeps originals if compression fails
-
-### Example Scenario
-```
-Before:
-E:\ROMS\retro\
-├── pacman.zip      (contains pacman.rom)
-├── pacman.rom      (duplicate - will be deleted)
-├── tetris.zip      (contains tetris.rom) 
-├── tetris.rom      (duplicate - will be deleted)
-├── solo.rom        (orphan - will be compressed)
-└── unique.zip      (no duplicate - kept unchanged)
-
-After:
-E:\ROMS\retro\
-├── pacman.zip      (unchanged)
-├── tetris.zip      (unchanged)
-├── solo.zip        (newly created from solo.rom)
-└── unique.zip      (unchanged)
-```
-
-## 🚀 Quick Start
-
-### Option 1: Download Executable
-1. Download the latest `DuplicateROMCleanZipper.exe` from the [Releases](../../releases) page
-2. Double-click to run (no installation required)
-3. Select your drive and click "Scan"
-
-### Option 2: Build from Source
-```bash
-# Clone the repository
-git clone https://github.com/[your-username]/duplicate-rom-cleanziper.git
-cd duplicate-rom-cleanziper
-
-# Build and run
-dotnet build
-dotnet run
-
-# Create standalone executable
-dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o ./publish
-```
-
-## 📖 Usage Instructions
-
-### Basic Workflow
-1. **Select Drive**: Choose any drive to scan from the dropdown menu (external drives, internal drives, network drives)
-2. **Configure Options**: 
-   - ☑️ Delete Duplicates (remove verified duplicate files)
-   - ☑️ Compress Orphans (compress standalone files to ZIP)
-   - ☑️ Dry Run Mode (preview only, no actual changes)
-3. **Scan**: Click "Scan" to analyze the drive
-4. **Review Results**: Examine found duplicates and orphans in the lists
-5. **Select Items**: Check/uncheck items you want to process
-6. **Process**: Click "Process Selected" and confirm the operations
-
-### Common Use Cases
-- **ROM Collections**: Clean up duplicate ROM files and compress individual ROMs
-- **Media Archives**: Organize music, video, and document collections
-- **Backup Drives**: Remove redundant files from backup storage
-- **External Storage**: Optimize USB drives, external HDDs, and network drives
+- **Single Unified List**: All detected files displayed in one sortable list with columns:
+  - Name: The filename
+  - Size: File size in MB
+  - File Type: "Orphan" or "Zipped Version Exists"
+  - Path: Directory location
+- **Resizable Window**: Fully resizable and maximizable interface
+- **Collapsible Console Log**: Click the log header to expand/collapse the console output
+- **Drive Selector**: Dropdown list of available drives (D: and higher)
+- **Refresh Button**: Update the drive list without restarting the application
+- **Select All Button**: Quickly select/deselect all items in the list
 
 ### Safety Features
-- **Dry Run Default**: Always starts in dry run mode to prevent accidents
-- **Double Confirmation**: Requires two "Yes" responses before any destructive operations
-- **Selective Processing**: Process only the files you explicitly select
-- **Detailed Logging**: Full operation history with timestamps
-- **Automatic Verification**: Ensures ZIP contents match before deletion
+- **Dry Run Mode** (enabled by default): Shows what would be done without making changes
+- **Double Confirmation**: Requires two confirmations before performing destructive operations
+- **Verification**: Verifies zip contents match original files before deletion
+- **Detailed Logging**: Complete operation log with timestamps
 
-### Command Line Interface
-The original PowerShell version supports command-line usage:
-```powershell
-# Dry run (default)
-.\duplicate-cleaner.ps1
+## System Requirements
 
-# Execute with orphan compression
-.\duplicate-cleaner.ps1 -Execute -CompressOrphans
-```
+- Windows 7 or later
+- .NET Framework 4.5 or higher
+- Administrator privileges (recommended for accessing all directories)
 
-## 🛠️ Technical Specifications
+## Installation
 
-### System Requirements
-- **Operating System**: Windows 10/11 (x64)
-- **Framework**: .NET 8.0 Runtime
-- **Permissions**: Standard user account (no admin required)
-- **Drive Access**: Read/write permissions for target drives (local, external, network)
+1. Download the latest release of ROM CleanZipper
+2. Extract to your preferred location
+3. Run `ROMCleanZipper.exe`
 
-### File Support
-- **ZIP Archives**: Full .NET ZipFile support with integrity checking
-- **File Extensions**: Any extension (automatically detected per folder)
-- **File Sizes**: No practical size limits (handles files up to available memory)
-- **Path Lengths**: Supports Windows long path names
-- **Drive Types**: Local drives, external USB/SATA, network mapped drives
+## Usage
+
+### Basic Operation
+
+1. **Select a Drive**: Choose the drive to scan from the dropdown menu
+2. **Configure Options**: 
+   - ✓ Delete Duplicates: Remove files that already exist in zip archives
+   - ✓ Compress Orphans: Create zip archives for uncompressed files
+   - ✓ Dry Run Mode: Preview changes without modifying files
+3. **Click Scan**: Starts scanning the selected drive
+4. **Review Results**: Check/uncheck files you want to process
+5. **Click "Delete Duplicates and Zip Orphans"**: Process selected files
+
+### Understanding File Types
+
+- **"Zipped Version Exists"**: The file exists in both compressed and uncompressed formats. The uncompressed version can be safely deleted.
+- **"Orphan"**: The file only exists in uncompressed format. It will be compressed into a zip archive.
+
+### Operation Details
+
+#### Duplicate Deletion
+- Verifies the file exists inside the zip with matching size
+- Deletes only the uncompressed version
+- Keeps the zip archive intact
+
+#### Orphan Compression
+- Creates a new zip archive with the same base name
+- Verifies successful compression
+- Deletes the original uncompressed file only after verification
+- If compression fails, the original file is preserved
+
+## Technical Details
+
+### Scanning Logic
+- Recursively scans all accessible directories
+- Skips system and hidden directories
+- Groups files by base name (filename without extension)
+- Compares file sizes to verify true duplicates
+
+### File Matching
+- Case-insensitive filename comparison
+- Matches files with identical base names (e.g., "Game.rom" matches "Game.zip")
+- Verifies file size within zip matches uncompressed file size
 
 ### Performance
-- **Threading**: Non-blocking UI with background workers
-- **Memory Usage**: Efficient streaming for large files
-- **Progress Reporting**: Real-time updates during operations
-- **Error Handling**: Graceful recovery from access denied errors
-- **Drive Compatibility**: Works with any Windows-accessible drive
+- Asynchronous scanning with progress reporting
+- Batch UI updates for better performance with large file sets
+- Cancellable operations
 
-### Security Features
-- **No Network Access**: Completely offline operation
-- **No Registry Changes**: Portable application with no system modifications
-- **No Data Collection**: Zero telemetry or data transmission
-- **Temporary Files**: Automatic cleanup of extraction temp directories
+## Safety Considerations
 
-## 🏗️ Building from Source
+1. **Always start with Dry Run Mode** to preview changes
+2. **Backup important files** before running in live mode
+3. **Review the file list** before processing
+4. The tool permanently deletes files - this cannot be undone
 
-### Prerequisites
-- [.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
-- Visual Studio 2022 Community (optional, for GUI development)
+## Troubleshooting
 
-### Build Steps
-```bash
-# Clone repository
-git clone https://github.com/[your-username]/duplicate-rom-cleanziper.git
-cd duplicate-rom-cleanziper
+### "Access Denied" Messages
+- Run as Administrator for full directory access
+- Some system directories will always be skipped
 
-# Restore dependencies
-dotnet restore
+### Missing Files in Results
+- Hidden files are not processed
+- System files are skipped
+- Ensure the files aren't already in zip format
 
-# Build debug version
-dotnet build
+### Compression Failures
+- Ensure sufficient disk space for temporary zip creation
+- Check file permissions
+- Very large files may take time to compress
 
-# Build release version
-dotnet build -c Release
+## Development
 
-# Create portable executable
-dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o ./publish
-```
+Built with:
+- C# / .NET Framework
+- Windows Forms
+- System.IO.Compression for zip operations
 
-### Development
-```bash
-# Run in development mode
-dotnet run
+## License
 
-# Run with debugging
-dotnet run --configuration Debug
-```
+[Specify your license here]
 
-## 🐛 Troubleshooting
+## Changelog
 
-### Common Issues
-- **"Access Denied" errors**: Normal for system directories - tool automatically skips and continues
-- **Slow scanning**: Large drives with many directories take time - watch progress bar
-- **ZIP verification failures**: Corrupted archives are automatically skipped with warnings
-- **No drives shown**: Only drives D: and above are displayed by design (excludes system drive C:)
-- **Network drive issues**: Ensure proper network permissions and stable connection
+### Version 2.0
+- Renamed from "Duplicate ROM CleanZipper" to "ROM CleanZipper"
+- Redesigned UI with single unified file list
+- Added resizable/maximizable window support
+- Added collapsible console log
+- Added refresh button for drive list
+- Improved layout system with proper docking
+- Added column-based file display with sortable headers
 
-### Getting Help
-- Check the real-time log window for detailed error messages
-- Enable dry run mode to safely test operations
-- Review the issues section for known problems and solutions
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-### Development Guidelines
-- Follow existing code style and patterns
-- Add appropriate error handling and logging
-- Test thoroughly with dry run mode
-- Update documentation for new features
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+### Version 1.0
+- Initial release with basic duplicate detection and orphan compression
